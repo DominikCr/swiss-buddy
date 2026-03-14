@@ -2,6 +2,7 @@ import * as Calendar from 'expo-calendar';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { getCurrentUser } from '../../lib/auth';
+import { saveScheduleSource } from '../../lib/backgroundSync';
 import { FlightEntry, parseIcal } from '../../lib/icalParser';
 import { saveSchedule } from '../../lib/schedule';
 
@@ -124,6 +125,7 @@ export default function ScheduleScreen() {
       Alert.alert('Fehler beim Speichern', error.message);
     } else {
       setSaved(true);
+      await saveScheduleSource(activeTab, activeTab === 'url' ? url : undefined);
       Alert.alert('Gespeichert!', `${flights.length} Flüge wurden erfolgreich importiert.`);
     }
   };

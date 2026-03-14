@@ -25,10 +25,7 @@ export default function TabLayout() {
       />
       <Tabs.Screen
         name="schedule"
-        options={{
-          title: 'Flugplan',
-          tabBarIcon: ({ color }) => <IconSymbol size={28} name="paperplane.fill" color={color} />,
-        }}
+        options={{ href: null }}
       />
       <Tabs.Screen
         name="flights"

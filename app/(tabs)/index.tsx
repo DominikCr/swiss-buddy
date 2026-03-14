@@ -1,6 +1,12 @@
-import { useState } from 'react';
-import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import * as Calendar from 'expo-calendar';
+import { router } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Alert, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { getCurrentUser, saveConsents, saveInterests, suggestInterest } from '../../lib/auth';
+import { saveScheduleSource } from '../../lib/backgroundSync';
+import { authenticateWithBiometrics, BiometricType, getBiometricType, isBiometricEnabled, setBiometricEnabled as saveBiometricEnabled } from '../../lib/biometric';
+import { FlightEntry, parseIcal } from '../../lib/icalParser';
+import { saveSchedule } from '../../lib/schedule';
 import { supabase } from '../../lib/supabase';
 
 const INTERESTS = {
@@ -16,7 +22,7 @@ const CONSENTS = [
 ];
 
 export default function WelcomeScreen() {
-  const [step, setStep] = useState<'login' | 'welcome' | 'consent' | 'interests'>('login');
+  const [step, setStep] = useState<'login' | 'welcome' | 'consent' | 'interests' | 'schedule' | 'biometric' | 'home'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -25,6 +31,37 @@ export default function WelcomeScreen() {
   const [customInterest, setCustomInterest] = useState('');
   const [pendingInterests, setPendingInterests] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [scheduleTab, setScheduleTab] = useState<'calendar' | 'url'>('calendar');
+  const [scheduleUrl, setScheduleUrl] = useState('');
+  const [biometricType, setBiometricType] = useState<BiometricType>('none');
+  const [biometricEnabled, setBiometricEnabledState] = useState(false);
+  const [profileName, setProfileName] = useState('');
+
+  useEffect(() => {
+    const init = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.user) return;
+
+      const type = await getBiometricType();
+      const enabled = await isBiometricEnabled();
+      setBiometricType(type);
+      setBiometricEnabledState(enabled);
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('display_name')
+        .eq('id', session.user.id)
+        .single();
+      if (profile?.display_name) setProfileName(profile.display_name);
+
+      if (type !== 'none' && enabled) {
+        setStep('biometric');
+      } else {
+        setStep('home');
+      }
+    };
+    init();
+  }, []);
 
   const allConsented = Object.values(consents).every(Boolean);
 
@@ -44,10 +81,46 @@ export default function WelcomeScreen() {
       return;
     }
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data: authData, error } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
     if (error) {
       Alert.alert('Fehler', error.message);
+      return;
+    }
+
+    const userId = authData.user?.id;
+    if (!userId) return;
+
+    const type = await getBiometricType();
+    const enabled = await isBiometricEnabled();
+    setBiometricType(type);
+    setBiometricEnabledState(enabled);
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('display_name, consent_date')
+      .eq('id', userId)
+      .single();
+
+    if (profile?.consent_date) {
+      if (profile.display_name) setProfileName(profile.display_name);
+      setStep('home');
+      if (type !== 'none' && !enabled) {
+        const label = type === 'face' ? 'Face ID' : 'Touch ID';
+        setTimeout(() => {
+          Alert.alert(
+            `${label} aktivieren?`,
+            'Beim nächsten Öffnen schnell und sicher einloggen.',
+            [
+              { text: 'Nein', style: 'cancel' },
+              { text: 'Aktivieren', onPress: async () => {
+                await saveBiometricEnabled(true);
+                setBiometricEnabledState(true);
+              }},
+            ]
+          );
+        }, 500);
+      }
     } else {
       setStep('welcome');
     }
@@ -75,7 +148,7 @@ export default function WelcomeScreen() {
       await suggestInterest(user.id, interest, 'Sonstiges');
     }
     setLoading(false);
-    Alert.alert('Willkommen!', 'Dein Profil wurde gespeichert. Die App ist bereit!');
+    setStep('schedule');
   };
 
   const submitCustomInterest = () => {
@@ -84,6 +157,244 @@ export default function WelcomeScreen() {
       setCustomInterest('');
     }
   };
+
+  const handleBiometricLogin = async () => {
+    setLoading(true);
+    const success = await authenticateWithBiometrics();
+    setLoading(false);
+    if (success) {
+      if (!profileName) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('display_name')
+            .eq('id', session.user.id)
+            .single();
+          if (profile?.display_name) setProfileName(profile.display_name);
+        }
+      }
+      setStep('home');
+    }
+  };
+
+  const handleToggleBiometric = async (val: boolean) => {
+    await saveBiometricEnabled(val);
+    setBiometricEnabledState(val);
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    await saveBiometricEnabled(false);
+    setBiometricEnabledState(false);
+    setProfileName('');
+    setStep('login');
+  };
+
+  const handleScheduleImport = async () => {
+    setLoading(true);
+    try {
+      let flights: FlightEntry[] = [];
+
+      if (scheduleTab === 'calendar') {
+        const { status } = await Calendar.requestCalendarPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Zugriff verweigert', 'Swiss Buddy benötigt Zugriff auf deinen Kalender.');
+          setLoading(false);
+          return;
+        }
+        const calendars = await Calendar.getCalendarsAsync(Calendar.EntityTypes.EVENT);
+        const swissCalendars = calendars.filter(cal =>
+          ['swiss', 'followme', 'crew', 'roster', 'schedule'].some(kw => cal.title.toLowerCase().includes(kw))
+        );
+        if (swissCalendars.length === 0) {
+          Alert.alert('Kein Kalender gefunden', 'Kein Swiss/FollowMe Kalender gefunden. Nutze die URL-Option.', [
+            { text: 'URL verwenden', onPress: () => { setScheduleTab('url'); setLoading(false); } },
+            { text: 'OK', onPress: () => setLoading(false) },
+          ]);
+          return;
+        }
+        const now = new Date();
+        const future = new Date(); future.setDate(future.getDate() + 90);
+        for (const cal of swissCalendars) {
+          const events = await Calendar.getEventsAsync([cal.id], now, future);
+          for (const event of events) {
+            const match = event.title?.match(/([A-Z]{2}\s?\d+)\s+([A-Z]{3})-([A-Z]{3})/);
+            if (!match) continue;
+            const start = new Date(event.startDate);
+            const end = new Date(event.endDate);
+            flights.push({
+              flightNumber: match[1].replace(' ', ''),
+              departureAirport: match[2],
+              arrivalAirport: match[3],
+              departureDate: start.toISOString().split('T')[0],
+              layoverHours: Math.max(0, Math.round((end.getTime() - start.getTime()) / 3600000)),
+            });
+          }
+        }
+      } else {
+        if (!scheduleUrl.trim()) {
+          Alert.alert('Fehler', 'Bitte gib eine URL ein.');
+          setLoading(false);
+          return;
+        }
+        const fetchUrl = scheduleUrl.trim().replace(/^webcal:\/\//i, 'https://');
+        const response = await fetch(fetchUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        flights = parseIcal(await response.text());
+      }
+
+      if (flights.length === 0) {
+        Alert.alert('Keine Flüge gefunden', 'Es wurden keine Flugdaten gefunden. Du kannst den Import später unter Home einrichten.');
+        setLoading(false);
+        return;
+      }
+
+      const user = await getCurrentUser();
+      if (!user) { setLoading(false); return; }
+      await saveSchedule(user.id, flights);
+      await saveScheduleSource(scheduleTab, scheduleTab === 'url' ? scheduleUrl : undefined);
+      setLoading(false);
+      Alert.alert(`${flights.length} Flüge importiert`, 'Dein Flugplan ist bereit. Swiss Buddy sucht jetzt nach Buddy-Überschneidungen.', [
+        { text: 'Los geht\'s', onPress: () => setStep('home') },
+      ]);
+    } catch {
+      setLoading(false);
+      Alert.alert('Fehler', 'Der Flugplan konnte nicht geladen werden.');
+    }
+  };
+
+  // SCHEDULE ONBOARDING STEP
+  if (step === 'schedule') {
+    return (
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title}>Flugplan einrichten</Text>
+        <Text style={styles.subtitle}>
+          Damit Swiss Buddy Buddy-Überschneidungen an deinen Layovers finden kann.
+        </Text>
+        <View style={styles.scheduleTabRow}>
+          <TouchableOpacity
+            style={[styles.scheduleTab, scheduleTab === 'calendar' && styles.scheduleTabActive]}
+            onPress={() => setScheduleTab('calendar')}
+          >
+            <Text style={[styles.tabText, scheduleTab === 'calendar' && styles.tabTextActive]}>📅 Kalender</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.scheduleTab, scheduleTab === 'url' && styles.scheduleTabActive]}
+            onPress={() => setScheduleTab('url')}
+          >
+            <Text style={[styles.tabText, scheduleTab === 'url' && styles.tabTextActive]}>🔗 URL</Text>
+          </TouchableOpacity>
+        </View>
+        {scheduleTab === 'calendar' && (
+          <View style={styles.infoBox}>
+            <Text style={styles.infoTitle}>iOS Kalender-Zugriff</Text>
+            <Text style={styles.infoText}>Swiss Buddy liest deinen bestehenden Swiss/FollowMe Kalender aus und importiert alle Flüge der nächsten 90 Tage.</Text>
+            <Text style={[styles.infoText, { marginTop: 8 }]}>Voraussetzung: Schedule Feed ist als Kalenderabo in iOS eingerichtet.</Text>
+          </View>
+        )}
+        {scheduleTab === 'url' && (
+          <>
+            <View style={styles.infoBox}>
+              <Text style={styles.infoTitle}>Schedule Feed URL</Text>
+              <Text style={styles.infoText}>1. FollowMe App öffnen → Einstellungen → Kalender</Text>
+              <Text style={styles.infoText}>2. Kalender-URL kopieren (webcal:// oder https://)</Text>
+              <Text style={styles.infoText}>3. Hier einfügen</Text>
+            </View>
+            <TextInput
+              style={styles.input}
+              placeholder="webcal://... oder https://..."
+              value={scheduleUrl}
+              onChangeText={setScheduleUrl}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+          </>
+        )}
+        <TouchableOpacity
+          style={[styles.button, loading && styles.buttonDisabled]}
+          onPress={handleScheduleImport}
+          disabled={loading}
+        >
+          {loading
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={styles.buttonText}>Flugplan laden & speichern</Text>
+          }
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.skipBtn} onPress={() => setStep('home')}>
+          <Text style={styles.skipBtnText}>Später einrichten</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
+  // BIOMETRIC SCREEN
+  if (step === 'biometric') {
+    const label = biometricType === 'face' ? 'Face ID' : 'Touch ID';
+    return (
+      <View style={styles.container}>
+        <View style={styles.iconBox}>
+          <Text style={styles.icon}>✈</Text>
+        </View>
+        <Text style={styles.title}>Swiss Buddy</Text>
+        <Text style={styles.subtitle}>Bestätige deine Identität um fortzufahren.</Text>
+        <TouchableOpacity
+          style={[styles.button, loading && styles.buttonDisabled]}
+          onPress={handleBiometricLogin}
+          disabled={loading}
+        >
+          {loading
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={styles.buttonText}>Mit {label} einloggen</Text>
+          }
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.skipBtn} onPress={() => setStep('login')}>
+          <Text style={styles.skipBtnText}>Mit Email & Passwort einloggen</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // HOME SCREEN
+  if (step === 'home') {
+    const label = biometricType === 'face' ? 'Face ID' : 'Touch ID';
+    return (
+      <ScrollView contentContainerStyle={styles.container}>
+        <View style={styles.iconBox}>
+          <Text style={styles.icon}>✈</Text>
+        </View>
+        <Text style={styles.title}>
+          {profileName ? `Hallo, ${profileName.split(' ')[0]}!` : 'Swiss Buddy'}
+        </Text>
+        <Text style={styles.subtitle}>Bereit für deinen nächsten Layover.</Text>
+        {biometricType !== 'none' && (
+          <View style={styles.settingRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.settingTitle}>{label}</Text>
+              <Text style={styles.settingDesc}>Beim Öffnen der App automatisch einloggen</Text>
+            </View>
+            <Switch
+              value={biometricEnabled}
+              onValueChange={handleToggleBiometric}
+              trackColor={{ false: '#ccc', true: '#185FA5' }}
+              thumbColor="#fff"
+            />
+          </View>
+        )}
+        <TouchableOpacity style={styles.settingRow} onPress={() => router.push('/(tabs)/schedule')}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.settingTitle}>Flugplan-Import</Text>
+            <Text style={styles.settingDesc}>Quelle bearbeiten oder neu laden</Text>
+          </View>
+          <Text style={styles.settingChevron}>›</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+          <Text style={styles.logoutText}>Ausloggen</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
 
   // LOGIN SCREEN
   if (step === 'login') {
@@ -245,17 +556,24 @@ export default function WelcomeScreen() {
       )}
 
       <TouchableOpacity
-        style={[styles.button, (selectedInterests.length === 0 || loading) && styles.buttonDisabled]}
-        disabled={selectedInterests.length === 0 || loading}
+        style={[styles.button, ((selectedInterests.length === 0 && pendingInterests.length === 0) || loading) && styles.buttonDisabled]}
+        disabled={(selectedInterests.length === 0 && pendingInterests.length === 0) || loading}
         onPress={handleFinish}
       >
         {loading
           ? <ActivityIndicator color="#fff" />
           : <Text style={styles.buttonText}>
-              {selectedInterests.length === 0 ? 'Mindestens 1 Interesse wählen' : `Fertig (${selectedInterests.length} gewählt)`}
+              {selectedInterests.length === 0 && pendingInterests.length === 0
+                ? 'Mindestens 1 Interesse wählen'
+                : `Fertig (${selectedInterests.length + pendingInterests.length} gewählt)`}
             </Text>
         }
       </TouchableOpacity>
+
+      <TouchableOpacity style={styles.skipBtn} onPress={handleFinish}>
+        <Text style={styles.skipBtnText}>Später ausfüllen</Text>
+      </TouchableOpacity>
+
     </ScrollView>
   );
 }
@@ -296,4 +614,17 @@ const styles = StyleSheet.create({
   pendingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 0.5, borderBottomColor: '#eee' },
   pendingText: { fontSize: 13, color: '#1a1a1a' },
   pendingBadge: { fontSize: 11, color: '#633806', backgroundColor: '#FAEEDA', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20 },
+  skipBtn: { padding: 14, alignItems: 'center', marginTop: 4 },
+  skipBtnText: { fontSize: 14, color: '#888' },
+  settingRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, borderBottomWidth: 0.5, borderBottomColor: '#eee', marginBottom: 8 },
+  settingTitle: { fontSize: 14, fontWeight: '500', color: '#1a1a1a', marginBottom: 2 },
+  settingDesc: { fontSize: 12, color: '#888' },
+  settingChevron: { fontSize: 20, color: '#185FA5', fontWeight: '300' },
+  logoutBtn: { marginTop: 24, padding: 14, alignItems: 'center' },
+  logoutText: { fontSize: 14, color: '#e74c3c', fontWeight: '500' },
+  scheduleTabRow: { flexDirection: 'row', marginBottom: 20, borderRadius: 10, overflow: 'hidden', borderWidth: 0.5, borderColor: '#ddd' },
+  scheduleTab: { flex: 1, padding: 12, alignItems: 'center', backgroundColor: '#F9F9F9' },
+  scheduleTabActive: { backgroundColor: '#185FA5' },
+  tabText: { fontSize: 14, fontWeight: '500', color: '#888' },
+  tabTextActive: { color: '#fff' },
 });

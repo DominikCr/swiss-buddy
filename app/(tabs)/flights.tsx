@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { getCurrentUser } from '../../lib/auth';
 import { getSchedule } from '../../lib/schedule';
 import { supabase } from '../../lib/supabase';
