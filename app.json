@@ -38,6 +38,18 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Swiss Buddy liest deinen Flugplan-Kalender um Buddy-Überschneidungen zu erkennen."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Swiss Buddy zeigt Crew-Spots in deiner Nähe und deinen Standort auf der Karte."
+        }
       ]
     ],
     "experiments": {

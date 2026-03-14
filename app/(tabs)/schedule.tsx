@@ -1,4 +1,5 @@
 import * as Calendar from 'expo-calendar';
+import { router } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { getCurrentUser } from '../../lib/auth';
@@ -137,6 +138,9 @@ export default function ScheduleScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container} scrollEnabled={true} showsVerticalScrollIndicator={true}>
+      <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+        <Text style={styles.backBtnText}>← Zurück</Text>
+      </TouchableOpacity>
       <Text style={styles.title}>Flugplan importieren</Text>
       <Text style={styles.subtitle}>Importiere deinen Schedule um Crew-Matches zu finden.</Text>
 
@@ -253,6 +257,8 @@ export default function ScheduleScreen() {
 
 const styles = StyleSheet.create({
   container: { flexGrow: 1, backgroundColor: '#fff', padding: 24, paddingTop: 60, paddingBottom: 40 },
+  backBtn: { marginBottom: 16 },
+  backBtnText: { fontSize: 15, color: '#185FA5', fontWeight: '500' },
   title: { fontSize: 24, fontWeight: '500', color: '#1a1a1a', marginBottom: 8 },
   subtitle: { fontSize: 14, color: '#666', lineHeight: 22, marginBottom: 20 },
   tabRow: { flexDirection: 'row', marginBottom: 20, borderRadius: 10, overflow: 'hidden', borderWidth: 0.5, borderColor: '#ddd' },
