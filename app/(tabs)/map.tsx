@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Callout, LongPressEvent, Marker, Region } from 'react-native-maps';
 import { getCurrentUser } from '../../lib/auth';
-import { addSpot, addTip, CrewSpot, getSpots, searchSpots, SpotCategory, SpotTip } from '../../lib/spots';
+import { addSpot, addTip, CrewSpot, getSpots, reverseGeocode, searchSpots, SpotCategory, SpotTip } from '../../lib/spots';
 import { supabase } from '../../lib/supabase';
 
 const CATEGORIES: { key: SpotCategory; label: string }[] = [
@@ -11,6 +11,8 @@ const CATEGORIES: { key: SpotCategory; label: string }[] = [
   { key: 'bar', label: 'Bar' },
   { key: 'sehenswürdigkeit', label: 'Sehensw.' },
   { key: 'hotel', label: 'Hotel' },
+  { key: 'sport', label: 'Sport' },
+  { key: 'shopping', label: 'Shopping' },
   { key: 'sonstiges', label: 'Sonstiges' },
 ];
 
@@ -19,6 +21,8 @@ const CATEGORY_COLOR: Record<SpotCategory, string> = {
   bar: '#9b59b6',
   sehenswürdigkeit: '#3498db',
   hotel: '#27ae60',
+  sport: '#e67e22',
+  shopping: '#e91e63',
   sonstiges: '#185FA5',
 };
 
@@ -27,6 +31,8 @@ const CATEGORY_LABEL: Record<SpotCategory, string> = {
   bar: 'Bar',
   sehenswürdigkeit: 'Sehenswürdigkeit',
   hotel: 'Hotel',
+  sport: 'Sport',
+  shopping: 'Shopping',
   sonstiges: 'Sonstiges',
 };
 
@@ -35,6 +41,17 @@ type Coord = { latitude: number; longitude: number };
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('de-CH', { day: 'numeric', month: 'short', year: 'numeric' });
 }
+
+const detectCategory = (name: string): SpotCategory => {
+  const n = name.toLowerCase();
+  if (/restaurant|bistro|café|cafe|ristorante|sushi|pizza|burger|grill|kitchen|diner|brasserie|trattoria|tavern|steakhouse|noodle|ramen|dim sum|barbecue|bbq/.test(n)) return 'restaurant';
+  if (/bar|pub|lounge|club|cocktail|brewery|wine|bier|beer|speakeasy/.test(n)) return 'bar';
+  if (/hotel|resort|hostel|inn|motel|lodge|suites|ritz|hilton|marriott|hyatt|sheraton/.test(n)) return 'hotel';
+  if (/museum|temple|church|cathedral|monument|castle|palace|tower|garden|park|beach|waterfall|shrine|mosque|gallery|ruins/.test(n)) return 'sehenswürdigkeit';
+  if (/tennis|golf|gym|fitness|swimming|pool|yoga|sport|stadium|arena|court|track/.test(n)) return 'sport';
+  if (/mall|shop|market|store|boutique|souvenir|bazaar|centro|outlet/.test(n)) return 'shopping';
+  return 'sonstiges';
+};
 
 export default function MapScreen() {
   const mapRef = useRef<MapView>(null);
@@ -46,14 +63,12 @@ export default function MapScreen() {
   const [userId, setUserId] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Add spot modal
   const [showAddModal, setShowAddModal] = useState(false);
   const [newName, setNewName] = useState('');
   const [newCategory, setNewCategory] = useState<SpotCategory>('restaurant');
   const [newTip, setNewTip] = useState('');
   const [saving, setSaving] = useState(false);
 
-  // Detail modal
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [selectedSpot, setSelectedSpot] = useState<CrewSpot | null>(null);
   const [editingTip, setEditingTip] = useState(false);
@@ -107,6 +122,7 @@ export default function MapScreen() {
     setSaving(true);
     const user = await getCurrentUser();
     if (!user) { setSaving(false); return; }
+    const geo = await reverseGeocode(coord.latitude, coord.longitude);
     const { error } = await addSpot({
       user_id: user.id,
       display_name: profileName || 'Unbekannt',
@@ -114,7 +130,9 @@ export default function MapScreen() {
       category: newCategory,
       latitude: coord.latitude,
       longitude: coord.longitude,
-      city: null,
+      city: geo.city,
+      country: geo.country,
+      continent: geo.continent,
     }, newTip);
     setSaving(false);
     if (!error) { await reloadSpots(); closeAddModal(); }
@@ -193,7 +211,6 @@ export default function MapScreen() {
         )}
       </MapView>
 
-      {/* Search bar */}
       <View style={styles.searchContainer}>
         <TextInput
           style={styles.searchInput}
@@ -203,9 +220,7 @@ export default function MapScreen() {
           clearButtonMode="while-editing"
         />
         {searchQuery !== '' && (
-          <Text style={styles.searchCount}>
-            {filteredSpots.length} Treffer
-          </Text>
+          <Text style={styles.searchCount}>{filteredSpots.length} Treffer</Text>
         )}
       </View>
 
@@ -220,7 +235,7 @@ export default function MapScreen() {
         <Text style={styles.addBtnText}>+</Text>
       </TouchableOpacity>
 
-      {/* ── ADD SPOT MODAL ── */}
+      {/* ADD SPOT MODAL */}
       <Modal visible={showAddModal} animationType="slide" presentationStyle="pageSheet">
         <View style={styles.modal}>
           <View style={styles.modalHeader}>
@@ -229,35 +244,52 @@ export default function MapScreen() {
           </View>
 
           <Text style={styles.modalLabel}>Name</Text>
-          <TextInput style={styles.modalInput} placeholder="z.B. Mo's Grill" value={newName} onChangeText={setNewName} maxLength={60} autoFocus />
+          <TextInput
+            style={styles.modalInput}
+            placeholder="z.B. Mo's Grill"
+            value={newName}
+            onChangeText={text => { setNewName(text); setNewCategory(detectCategory(text)); }}
+            maxLength={60}
+            autoFocus
+          />
 
           <Text style={styles.modalLabel}>Kategorie</Text>
           <View style={styles.categoryRow}>
             {CATEGORIES.map(cat => (
-              <TouchableOpacity key={cat.key}
+              <TouchableOpacity
+                key={cat.key}
                 style={[styles.categoryBtn, newCategory === cat.key && styles.categoryBtnActive]}
-                onPress={() => setNewCategory(cat.key)}>
+                onPress={() => setNewCategory(cat.key)}
+              >
                 <Text style={[styles.catBtnLabel, newCategory === cat.key && styles.catBtnLabelActive]}>{cat.label}</Text>
               </TouchableOpacity>
             ))}
           </View>
 
           <Text style={styles.modalLabel}>Erster Tipp (optional)</Text>
-          <TextInput style={[styles.modalInput, styles.modalInputMultiline]}
+          <TextInput
+            style={[styles.modalInput, styles.modalInputMultiline]}
             placeholder="z.B. Beste Clam Chowder in ganz SF!"
-            value={newTip} onChangeText={setNewTip} multiline maxLength={200} />
+            value={newTip}
+            onChangeText={setNewTip}
+            multiline
+            maxLength={200}
+          />
 
           <Text style={styles.locationHint}>
             {pendingCoord ? 'Markierter Kartenort wird gespeichert' : 'Dein aktueller Standort wird gespeichert'}
           </Text>
-          <TouchableOpacity style={[styles.saveBtn, (saving || !newName.trim()) && styles.saveBtnDisabled]}
-            onPress={handleSaveSpot} disabled={saving || !newName.trim()}>
+          <TouchableOpacity
+            style={[styles.saveBtn, (saving || !newName.trim()) && styles.saveBtnDisabled]}
+            onPress={handleSaveSpot}
+            disabled={saving || !newName.trim()}
+          >
             {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnText}>Spot speichern</Text>}
           </TouchableOpacity>
         </View>
       </Modal>
 
-      {/* ── SPOT DETAIL MODAL ── */}
+      {/* SPOT DETAIL MODAL */}
       <Modal visible={showDetailModal} animationType="slide" presentationStyle="pageSheet">
         <ScrollView style={styles.modal} contentContainerStyle={{ paddingBottom: 40 }}>
           <View style={styles.modalHeader}>
@@ -274,7 +306,6 @@ export default function MapScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Current tip */}
           <Text style={styles.sectionLabel}>
             {selectedSpot?.currentTip ? `Aktueller Tipp (v${selectedSpot.currentTip.version})` : 'Tipp'}
           </Text>
@@ -287,7 +318,6 @@ export default function MapScreen() {
             <Text style={styles.noTip}>Noch kein Tipp. Sei die Erste!</Text>
           )}
 
-          {/* Edit tip */}
           {!editingTip ? (
             <TouchableOpacity style={styles.editTipBtn} onPress={() => {
               setEditingTip(true);
@@ -316,14 +346,14 @@ export default function MapScreen() {
                 <TouchableOpacity
                   style={[styles.saveBtn, { flex: 1 }, (saving || !editTipContent.trim()) && styles.saveBtnDisabled]}
                   onPress={handleSaveTip}
-                  disabled={saving || !editTipContent.trim()}>
+                  disabled={saving || !editTipContent.trim()}
+                >
                   {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnText}>Speichern</Text>}
                 </TouchableOpacity>
               </View>
             </View>
           )}
 
-          {/* Version history */}
           {(selectedSpot?.tipHistory?.length ?? 0) > 1 && (
             <View style={{ marginTop: 24 }}>
               <TouchableOpacity style={styles.historyToggle} onPress={() => setShowHistory(v => !v)}>
@@ -332,7 +362,6 @@ export default function MapScreen() {
                 </Text>
                 <Text style={styles.historyChevron}>{showHistory ? '▲' : '▼'}</Text>
               </TouchableOpacity>
-
               {showHistory && selectedSpot?.tipHistory?.slice(1).map((tip: SpotTip) => (
                 <View key={tip.id} style={styles.historyCard}>
                   <View style={styles.historyHeader}>

@@ -1,4 +1,3 @@
-import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import { supabase } from './supabase';
 
@@ -13,10 +12,7 @@ Notifications.setNotificationHandler({
 });
 
 export async function registerForPushNotifications(userId: string) {
-  if (!Device.isDevice) {
-    console.log('Push Notifications nur auf echtem Gerät verfügbar');
-    return null;
-  }
+  // Lokale Notifications funktionieren auch im Simulator
 
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
   let finalStatus = existingStatus;
